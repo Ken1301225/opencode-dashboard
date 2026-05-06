@@ -40,6 +40,7 @@ python3 opencode_dashboard.py
 | `CLAUDE_CONFIG_DIR` | Claude Code 配置目录 | `~/.claude` |
 | `CODEX_HOME` | Codex 数据目录 | `~/.codex` |
 | `DASHBOARD_HEATMAP_DAYS` | 热力图时间窗口（天） | 14 |
+| `DASHBOARD_MAHJONG_WIDTH` | 无 `wcwidth` 时麻将牌显示宽度回退（1/2） | 1 |
 | `FORCE_COLOR` | 强制启用 ANSI 颜色 | off |
 | `NO_COLOR` | 禁用所有颜色 | off |
 
@@ -51,6 +52,9 @@ DASHBOARD_PROVIDER=claude python3 opencode_dashboard.py
 
 # 查看更长时间段的热力图
 DASHBOARD_HEATMAP_DAYS=30 python3 opencode_dashboard.py
+
+# 如果你的终端把麻将牌显示成双宽
+DASHBOARD_MAHJONG_WIDTH=2 python3 opencode_dashboard.py
 ```
 
 # 赋予执行权限
@@ -154,6 +158,11 @@ opencode-dashboard
   - macOS 默认终端、iTerm2、Windows Terminal、alacritty 均支持良好
 - **颜色**：需要支持 truecolor（24-bit）的终端
   - 检测方法：`echo $COLORTERM` 应输出 `truecolor` 或 `24bit`
+- **宽度**：如果未安装 `wcwidth` 且麻将牌对不齐，可用 `DASHBOARD_MAHJONG_WIDTH=2` 切换双宽回退
+
+## 模型显示说明
+
+Claude Code 和 Codex 的模型分布来自各自本地数据源里的真实记录。本工具会过滤 `<synthetic>`、`unknown`、`openai/?` 和 0 token 这类占位/脏数据，但不会把真实出现过的第三方 provider 或自定义模型强行改名。
 
 ## 数据结构
 

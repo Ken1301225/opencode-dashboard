@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Agent Dashboard — token consumption visualizer for CLI agent tools
 Supports OpenCode, Claude Code, and Codex."""
-import sqlite3, sys, os, re, glob, json
+import sqlite3, sys, os, re, glob, json, unicodedata
 from abc import ABC, abstractmethod
 from datetime import date, timedelta
+
+try:
+    from wcwidth import wcwidth as _wcwidth
+except ImportError:
+    _wcwidth = None
 
 # ── cross-platform paths ───────────────────────────────────────
 
@@ -79,12 +84,63 @@ C = {
 ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 W = 78
 CONTENT_W = W - 6
+HEATMAP_CELL_W = 6
+HEATMAP_ZERO_SYMBOL = '🀆'
+MODEL_PLACEHOLDERS = {"", "?", "unknown", "<synthetic>"}
 
 def c(code):
     return C.get(code, "") if ANSI_ENABLED else ""
 
+def _char_width(ch):
+    if _wcwidth is not None:
+        return max(_wcwidth(ch), 0)
+    code = ord(ch)
+    if 0x1F000 <= code <= 0x1F02F:
+        return 2 if os.environ.get("DASHBOARD_MAHJONG_WIDTH") == "2" else 1
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.east_asian_width(ch) in {'F', 'W'}:
+        return 2
+    return 1
+
 def vlen(s):
-    return len(ANSI_RE.sub('', s))
+    return sum(_char_width(ch) for ch in ANSI_RE.sub('', s))
+
+def truncate_visible(text, width):
+    result = []
+    visible = 0
+    for ch in text:
+        ch_width = _char_width(ch)
+        if visible + ch_width > width:
+            break
+        result.append(ch)
+        visible += ch_width
+    return ''.join(result)
+
+def pad_visible(text, width, align='l'):
+    text = str(text)
+    visible = vlen(text)
+    if visible >= width:
+        return truncate_visible(text, width)
+    pad = width - visible
+    if align == 'r':
+        return ' ' * pad + text
+    if align == 'c':
+        left = pad // 2
+        right = pad - left
+        return ' ' * left + text + ' ' * right
+    return text + ' ' * pad
+
+def render_heatmap_cell(text='', width=HEATMAP_CELL_W):
+    return pad_visible(text, width, align='c')
+
+def is_visible_model_name(model, total):
+    model = (model or "").strip()
+    if (total or 0) <= 0:
+        return False
+    if model.lower() in MODEL_PLACEHOLDERS:
+        return False
+    return all(part.strip().lower() not in MODEL_PLACEHOLDERS for part in model.split('/'))
 
 # ── alignment-safe helpers ─────────────────────────────────────
 
@@ -92,19 +148,18 @@ def fit(text, width, align='l'):
     text = str(text)
     v = vlen(text)
     if v <= width:
-        return text.ljust(width) if align == 'l' else text.rjust(width)
+        return pad_visible(text, width, 'r' if align == 'r' else 'l')
     if width <= 2:
-        return text[:width]
-    return text[:width - 2] + '..'
+        return truncate_visible(text, width)
+    return truncate_visible(text, width - 2) + '..'
 
 def center_text(text, width=CONTENT_W):
     v = vlen(text)
     if v > width:
-        return text[:width - 2] + '..'
+        return truncate_visible(text, width - 2) + '..'
     if v >= width:
         return text
-    pad = (width - v) // 2
-    return ' ' * pad + text + ' ' * (width - v - pad)
+    return pad_visible(text, width, 'c')
 
 def build_line(parts, width=CONTENT_W):
     result = []
@@ -379,9 +434,12 @@ class ClaudeCodeProvider(BaseProvider):
                     cache = json.load(f)
                 model_usage = cache.get("modelUsage", {})
                 for model_name, data in model_usage.items():
+                    total = data.get("tokens", 0)
+                    if not is_visible_model_name(model_name, total):
+                        continue
                     models.append({
                         "model": model_name, "cnt": data.get("turns", 0),
-                        "total": data.get("tokens", 0), "cost": 0,
+                        "total": total, "cost": 0,
                     })
             except Exception:
                 pass
@@ -410,6 +468,8 @@ class ClaudeCodeProvider(BaseProvider):
                     except Exception:
                         continue
                 for mn, d in sorted(model_map.items(), key=lambda x: -x[1]["total"]):
+                    if not is_visible_model_name(mn, d["total"]):
+                        continue
                     models.append({"model": mn, "cnt": d["cnt"], "total": d["total"], "cost": 0})
         return models
 
@@ -472,14 +532,20 @@ class CodexProvider(BaseProvider):
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("""
-                SELECT COALESCE(model_provider,'?') || '/' ||
-                       COALESCE(model,'?') as model,
+                SELECT model_provider, model,
                        COUNT(*) as cnt,
                        SUM(CAST(tokens_used AS INTEGER)) as total
                 FROM threads WHERE tokens_used IS NOT NULL
-                GROUP BY model ORDER BY total DESC
+                GROUP BY model_provider, model ORDER BY total DESC
             """)
-            return [{"model": r["model"], "cnt": r["cnt"], "total": r["total"] or 0, "cost": 0} for r in cur.fetchall()]
+            models = []
+            for r in cur.fetchall():
+                name = f"{r['model_provider'] or '?'}/{r['model'] or '?'}"
+                total = r["total"] or 0
+                if not is_visible_model_name(name, total):
+                    continue
+                models.append({"model": name, "cnt": r["cnt"], "total": total, "cost": 0})
+            return models
         except Exception:
             return []
 
@@ -643,10 +709,8 @@ def render(trends, models, source_label=""):
 
             # Transposed: column headers = Mon-Sun
             day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-            hdr_parts = [('       ', 'DIM')]
-            for dn in day_names:
-                hdr_parts.append((f' {dn} ', 'DIM'))
-            lines.append(f"  {c('BDR')}│{c('RST')} {build_line(hdr_parts)} {c('BDR')}│{c('RST')}")
+            header_text = ' ' * 8 + ''.join(render_heatmap_cell(dn) for dn in day_names)
+            lines.append(f"  {c('BDR')}│{c('RST')} {build_line([(header_text, 'DIM')])} {c('BDR')}│{c('RST')}")
             lines.append(f"  {c('BDR')}│{c('RST')} {build_line([('─' * CONTENT_W, 'DIM')])} {c('BDR')}│{c('RST')}")
 
             # Collect which dice levels actually appear
@@ -655,19 +719,18 @@ def render(trends, models, source_label=""):
 
             # Fixed widths for sparkline + number column
             SPARK_COL_W = 10  # " ▃  48M"
-            LEFT_FIXED_W = 8 + 7 * 6  # date(" Apr 20 ") + 7 days(6 each) = 50
-            SPARK_PAD = CONTENT_W - LEFT_FIXED_W - SPARK_COL_W  # 72-50-10 = 12
+            LEFT_FIXED_W = 8 + 7 * HEATMAP_CELL_W  # date(" Apr 20 ") + 7 cells = 50
 
             # Each row = one week
             for w in weeks:
-                row_parts = [(f' {w.strftime("%b %d")} ', 'A0')]
+                row_parts = [f'{c("A0")} {w.strftime("%b %d")} {c("RST")}']
                 week_sum = 0
                 for di in range(7):
                     d = w + timedelta(days=di)
                     if d < cutoff or d > today_val:
-                        row_parts.append(('      ', None))
+                        row_parts.append(' ' * HEATMAP_CELL_W)
                     elif d.isoformat() not in day_map or day_map[d.isoformat()]['total'] == 0:
-                        row_parts.append((f' {c("DIM")}·{c("RST")}    ', None))
+                        row_parts.append(render_heatmap_cell(f'{c("DIM")}{HEATMAP_ZERO_SYMBOL}{c("RST")}'))
                     else:
                         val = day_map[d.isoformat()]['total']
                         week_sum += val
@@ -675,9 +738,11 @@ def render(trends, models, source_label=""):
                         level = min(int(pct * 6), 5)
                         used_levels.add(level)
                         color = heat_color(pct)
-                        row_parts.append((f' {color}{symbols[level]}{c("RST")}   ', None))
+                        row_parts.append(render_heatmap_cell(f'{color}{symbols[level]}{c("RST")}'))
                 # Build left side (fixed 50w)
-                left_line = build_line(row_parts, width=LEFT_FIXED_W)
+                left_line = ''.join(row_parts)
+                if vlen(left_line) < LEFT_FIXED_W:
+                    left_line += ' ' * (LEFT_FIXED_W - vlen(left_line))
                 # Build right side: sparkline + week total
                 if week_sum > 0:
                     w_pct = week_sum / (max_t * 7) if max_t > 0 else 0
