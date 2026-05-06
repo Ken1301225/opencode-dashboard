@@ -334,13 +334,22 @@ class ClaudeCodeProvider(BaseProvider):
                             if not line.strip():
                                 continue
                             msg = json.loads(line)
-                            if msg.get("type") != "assistant":
+                            msg_type = msg.get("type", "")
+                            if msg_type not in ("assistant", "message", "assistant_message"):
                                 continue
-                            usage = msg.get("message", {}).get("usage", {})
-                            total = (usage.get("input_tokens", 0) +
-                                     usage.get("output_tokens", 0) +
-                                     usage.get("cache_read_input_tokens", 0) +
-                                     usage.get("cache_creation_input_tokens", 0))
+                            # Multi-path usage extraction
+                            usage = msg.get("usage") or msg.get("message", {}).get("usage") or {}
+                            def _try_keys(d, *keys):
+                                for k in keys:
+                                    v = d.get(k)
+                                    if v is not None and v > 0:
+                                        return v
+                                return 0
+                            inp = _try_keys(usage, "input_tokens", "inputTokens", "prompt_tokens")
+                            out = _try_keys(usage, "output_tokens", "outputTokens", "completion_tokens")
+                            cr  = _try_keys(usage, "cache_read_input_tokens", "cacheReadInputTokens", "cache_read")
+                            cc  = _try_keys(usage, "cache_creation_input_tokens", "cacheCreationInputTokens", "cache_write")
+                            total = inp + out + cr + cc
                             if total == 0:
                                 continue
                             ts = msg.get("timestamp") or ""
@@ -348,10 +357,9 @@ class ClaudeCodeProvider(BaseProvider):
                             if day not in day_map:
                                 day_map[day] = {"input_t": 0, "output_t": 0, "cache_read": 0, "total": 0, "cnt": 0}
                             day_map[day]["total"] += total
-                            day_map[day]["input_t"] += usage.get("input_tokens", 0)
-                            day_map[day]["output_t"] += usage.get("output_tokens", 0)
-                            day_map[day]["cache_read"] += (usage.get("cache_read_input_tokens", 0) +
-                                                           usage.get("cache_creation_input_tokens", 0))
+                            day_map[day]["input_t"] += inp
+                            day_map[day]["output_t"] += out
+                            day_map[day]["cache_read"] += cr + cc
                             day_map[day]["cnt"] += 1
                 except Exception:
                     continue
@@ -377,6 +385,32 @@ class ClaudeCodeProvider(BaseProvider):
                     })
             except Exception:
                 pass
+        # JSONL fallback: extract model names and token counts
+        if not models:
+            projects_dir = os.path.join(base, "projects")
+            if os.path.isdir(projects_dir):
+                model_map = {}
+                for jsonl_path in glob.glob(os.path.join(projects_dir, "**", "*.jsonl"), recursive=True):
+                    try:
+                        with open(jsonl_path) as f:
+                            for line in f:
+                                if not line.strip():
+                                    continue
+                                msg = json.loads(line)
+                                if msg.get("type") not in ("assistant", "message"):
+                                    continue
+                                model = msg.get("model") or msg.get("message", {}).get("model", "unknown")
+                                usage = msg.get("usage") or msg.get("message", {}).get("usage") or {}
+                                t = sum(v for k, v in usage.items() if isinstance(v, (int, float)) and
+                                        ("token" in k.lower() or "cache" in k.lower()))
+                                if model not in model_map:
+                                    model_map[model] = {"total": 0, "cnt": 0}
+                                model_map[model]["total"] += t
+                                model_map[model]["cnt"] += 1
+                    except Exception:
+                        continue
+                for mn, d in sorted(model_map.items(), key=lambda x: -x[1]["total"]):
+                    models.append({"model": mn, "cnt": d["cnt"], "total": d["total"], "cost": 0})
         return models
 
 
@@ -386,11 +420,27 @@ class CodexProvider(BaseProvider):
 
     def source_path(self):
         base = os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex"))
-        matches = glob.glob(os.path.join(base, "**", "state*.sqlite"), recursive=True)
+        matches = glob.glob(os.path.join(base, "**", "state_*.sqlite"), recursive=True)
         if matches:
             matches.sort(key=os.path.getmtime, reverse=True)
             return matches[0]
         return os.path.join(base, "data", "state.v5.sqlite")
+
+    def is_available(self):
+        path = self.source_path()
+        if not os.path.exists(path):
+            return False
+        # Verify schema: threads table must exist with expected columns
+        try:
+            conn = sqlite3.connect(path)
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='threads'")
+            if not cur.fetchone():
+                return False
+            conn.close()
+            return True
+        except Exception:
+            return False
 
     def get_trends(self):
         path = self.source_path()
@@ -401,7 +451,7 @@ class CodexProvider(BaseProvider):
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("""
-                SELECT date(created_at) as day, COUNT(*) as cnt,
+                SELECT date(created_at, 'unixepoch') as day, COUNT(*) as cnt,
                        SUM(tokens_used) as total
                 FROM threads WHERE tokens_used IS NOT NULL
                 GROUP BY day ORDER BY day
@@ -461,6 +511,17 @@ def select_provider():
         for p in available:
             if p.name() == env_choice:
                 return p
+        # Explicitly set but not found — error out
+        known = [p.name() for p in PROVIDERS]
+        if env_choice in known:
+            print(f"Provider '{env_choice}' data source not found. Is {env_choice} installed?",
+                  file=sys.stderr)
+        else:
+            print(f"Unknown provider '{env_choice}'. Known: {', '.join(known)}",
+                  file=sys.stderr)
+        print(f"  Available: {[p.name() for p in available] if available else '(none)'}",
+              file=sys.stderr)
+        sys.exit(1)
     if len(available) == 1:
         return available[0]
     # Non-TTY: pick first
@@ -569,11 +630,10 @@ def render(trends, models, source_label=""):
             # Heatmap window: last 14 days (configurable via DASHBOARD_HEATMAP_DAYS)
             today_val = date.today()
             heatmap_days = int(os.environ.get("DASHBOARD_HEATMAP_DAYS", "14"))
-            cutoff = today_val - timedelta(days=heatmap_days)
-            # Align to Monday for clean week rows
-            cutoff -= timedelta(days=cutoff.weekday())
-            start = cutoff
-            end = today_val + timedelta(days=6 - today_val.weekday())
+            cutoff = today_val - timedelta(days=heatmap_days - 1)
+            # Align start to Monday for clean week rows (only fills leading blanks)
+            start = cutoff - timedelta(days=cutoff.weekday())
+            end = today_val
 
             weeks = []
             cur = start
@@ -742,6 +802,8 @@ def render(trends, models, source_label=""):
                 lines.append(f"  {c('BDR')}│{c('RST')} {build_line([('─' * CONTENT_W, 'DIM')])} {c('BDR')}│{c('RST')}")
 
                 for d_str, data in recent_days:
+                    if not d_str:
+                        continue
                     d_obj = date.fromisoformat(d_str)
                     date_label = d_obj.strftime('%b %d')
                     inp = data['input']
@@ -787,6 +849,10 @@ def render(trends, models, source_label=""):
     ])
     lines.append(f"  {c('BDR')}│{c('RST')} {hdr} {c('BDR')}│{c('RST')}")
     lines.append(f"  {c('BDR')}│{c('RST')} {build_line([('─' * CONTENT_W, 'DIM')])} {c('BDR')}│{c('RST')}")
+
+    if not models:
+        no_data = build_line([('   (no model data available for this provider)', 'DIM')])
+        lines.append(f"  {c('BDR')}│{c('RST')} {no_data} {c('BDR')}│{c('RST')}")
 
     for m in models[:10]:
         name = m['model']

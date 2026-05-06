@@ -1,0 +1,222 @@
+Metadata-Version: 2.4
+Name: opencode-dashboard
+Version: 2.0.0
+Summary: Terminal token consumption dashboard for AI CLI agents. Mahjong tile heatmaps, cross-platform (Win/Mac/Linux), supports OpenCode, Claude Code, Codex.
+Home-page: https://github.com/Ken1301225/opencode-dashboard
+Author: Ken
+Classifier: Development Status :: 4 - Beta
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Utilities
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Dynamic: author
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: requires-python
+Dynamic: summary
+
+# agent-dashboard
+
+🀙🀚🀛🀜🀝🀞 Terminal token consumption visualizer for AI CLI agents — OpenCode, Claude Code, Codex, and more.
+
+![python](https://img.shields.io/badge/python-3.8%2B-blue)
+![platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
+![license](https://img.shields.io/badge/license-MIT-green)
+
+## 特性
+
+- **多 Agent 支持**：兼容 OpenCode、Claude Code、Codex，运行时交互式选择数据源
+- **麻将热力图**：用 Unicode 麻将筒子（🀙→🀞）做 1-6 级密度可视化，天然圆点递进
+- **Twilight 渐变**：48 格连续 truecolor 光谱，indigo→rose 平滑过渡
+- **跨平台**：Windows / macOS / Linux 全平台路径解析 + ANSI 适配
+- **智能窗口**：日历热力图只展示最近 2 周（可配置），避免信息过载
+- **周趋势 sparkline**：每周末尾显示 ▁▂▃▄▅▆▇█ 微柱状图 + 周总量
+- **每日明细**：最近 5 个活跃日的 input/output/cache/total 分项统计
+- **模型分布**：8 倍分辨率 eighth-block 柱状图（▏▎▍▌▋▊▉█）
+- **零依赖**：仅使用 Python 标准库 + sqlite3
+
+## 使用
+
+```bash
+# 直接运行（自动检测数据源）
+python3 opencode_dashboard.py
+
+# 多 Agent 并存时会弹出交互式选择菜单：
+#   Available agents:
+#     [1] opencode  (/home/ken/.local/share/opencode/opencode.db)
+#     [2] claude    (/home/ken/.claude)
+#   Select [1-2, default=1]:
+```
+
+### 环境变量
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `DASHBOARD_PROVIDER` | 预设数据源（opencode/claude/codex） | 交互式选择 |
+| `OPENCODE_DB` | OpenCode 数据库路径 | 平台默认路径 |
+| `CLAUDE_CONFIG_DIR` | Claude Code 配置目录 | `~/.claude` |
+| `CODEX_HOME` | Codex 数据目录 | `~/.codex` |
+| `DASHBOARD_HEATMAP_DAYS` | 热力图时间窗口（天） | 14 |
+| `FORCE_COLOR` | 强制启用 ANSI 颜色 | off |
+| `NO_COLOR` | 禁用所有颜色 | off |
+
+### 非交互模式
+
+```bash
+# 直接指定数据源，跳过交互菜单
+DASHBOARD_PROVIDER=claude python3 opencode_dashboard.py
+
+# 查看更长时间段的热力图
+DASHBOARD_HEATMAP_DAYS=30 python3 opencode_dashboard.py
+```
+
+# 赋予执行权限
+chmod +x opencode-dashboard.py
+
+# 测试运行
+python3 opencode-dashboard.py
+```
+
+### 方式二：pip 安装（推荐）
+
+```bash
+pip install git+https://github.com/Ken1301225/opencode-dashboard.git
+
+# 或者本地安装
+git clone https://github.com/Ken1301225/opencode-dashboard.git
+cd opencode-dashboard
+pip install -e .
+```
+
+## 注册命令到 Shell
+
+### Bash
+
+```bash
+# 添加到 ~/.bashrc
+echo '
+# opencode-dashboard
+opencode-dashboard() {
+    python3 /path/to/opencode-dashboard/opencode-dashboard.py
+}
+' >> ~/.bashrc
+
+source ~/.bashrc
+```
+
+### Zsh
+
+```bash
+# 添加到 ~/.zshrc
+echo '
+# opencode-dashboard
+opencode-dashboard() {
+    python3 /path/to/opencode-dashboard/opencode-dashboard.py
+}
+' >> ~/.zshrc
+
+source ~/.zshrc
+```
+
+### 使用 pip 安装后的命令
+
+如果通过 pip 安装，会自动注册 `opencode-dashboard` 命令，直接运行：
+
+```bash
+opencode-dashboard
+```
+
+
+
+## 效果预览
+
+```
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │                     opencode  ·  token  dashboard                      │
+  │                 160M  ·  $22.42  ·  15d  ·  1988 calls                 │
+  │ ──────────────────────────────────────────────────────────────────────── │
+  │   ●○○○○○○○○○○○○○○○○○○  input    7.2%                                    │
+  │   ○○○○○○○○○○○○○○○○○○○○  output   0.6%                                    │
+  │   ●●●●●●●●●●●●●●●●●●○○  cache   92.3%                                    │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │  calendar heatmap                                                        │
+  │ ──────────────────────────────────────────────────────────────────────── │
+  │        Mon   Tue   Wed   Thu   Fri   Sat   Sun                               │
+  │ ──────────────────────────────────────────────────────────────────────── │
+  │  Apr 20  🀙    🀙    🀙    🀙    🀙    🀙    🀙                        ▁    27M │
+  │  Apr 27  🀛    🀙    🀙    🀞    🀙    🀛    🀚                        ▃   107M │
+  │  May 04  🀜                                                      ▁    25M │
+  │ ▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮▮                                    │
+  │ ↓        ↓         ↓        ↓                  ↓                         │
+  │ 🀙 0    🀚 10M     🀛 20M    🀜 30M            🀞 49M                         │
+  │ ──────────────────────────────────────────────────────────────────────── │
+  │  daily breakdown (last 5 active)                                         │
+  │ ──────────────────────────────────────────────────────────────────────── │
+  │   → input  ← output  ⛁ cache  ─ total                                     │
+  │ ──────────────────────────────────────────────────────────────────────── │
+  │  Apr 30  →     2M   ←   132K   ⛁    47M   ─     49M                      │
+  │  May 01  →   498K   ←    21K   ⛁     3M   ─      3M                      │
+  │  May 02  →     2M   ←   222K   ⛁    15M   ─     17M                      │
+  │  May 03  →   573K   ←    43K   ⛁     8M   ─      9M                      │
+  │  May 04  →     1M   ←    35K   ⛁    24M   ─     25M                      │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+```
+
+## 终端要求
+
+- **字体**：需要支持麻将字符（U+1F000+）和方块元素（U+2580+）的等宽字体
+  - 推荐：[Nerd Fonts](https://www.nerdfonts.com/) 系列（如 Hack Nerd Font、JetBrainsMono Nerd Font）
+  - macOS 默认终端、iTerm2、Windows Terminal、alacritty 均支持良好
+- **颜色**：需要支持 truecolor（24-bit）的终端
+  - 检测方法：`echo $COLORTERM` 应输出 `truecolor` 或 `24bit`
+
+## 数据结构
+
+本工具读取 opencode 的 SQLite 数据库中的 `message` 表，解析以下 JSON 字段：
+
+```json
+{
+  "tokens": {
+    "total": 1000,
+    "input": 100,
+    "output": 50,
+    "cache": {
+      "read": 850
+    }
+  },
+  "cost": 0.001,
+  "providerID": "openai",
+  "modelID": "gpt-4",
+  "role": "assistant"
+}
+```
+
+## 技术细节
+
+| 组件 | 实现 |
+|------|------|
+| 热力图符号 | Unicode 麻将筒子 🀙🀚🀛🀜🀝🀞 |
+| 颜色系统 | ANSI truecolor 线性插值（6 个 twilight stop） |
+| 柱状图 | 左向 eighth-block（▏▎▍▌▋▊▉█） |
+| IO 仪表盘 | 空心/实心圆组合（●○） |
+| OpenCode 后端 | SQLite `message` 表，JSON 提取 tokens/cost |
+| Claude Code 后端 | `stats-cache.json` 聚合缓存 + JSONL 回退 |
+| Codex 后端 | SQLite `threads` 表（实验性） |
+| 跨平台路径 | Windows `%LOCALAPPDATA%`, macOS `~/Library`, Linux `XDG` |
+| ANSI 适配 | Windows `SetConsoleMode` VT + `NO_COLOR` 标准 |
+
+## License
+
+MIT

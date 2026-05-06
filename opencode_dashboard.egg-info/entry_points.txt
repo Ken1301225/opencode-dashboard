@@ -1,0 +1,2 @@
+[console_scripts]
+opencode-dashboard = opencode_dashboard:main
