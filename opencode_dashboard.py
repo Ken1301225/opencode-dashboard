@@ -1,9 +1,42 @@
 #!/usr/bin/env python3
-"""OPEncode Token Dashboard — twilight theme + braille / eighth-block visuals"""
-import sqlite3, sys, os, re
+"""Agent Dashboard — token consumption visualizer for CLI agent tools
+Supports OpenCode, Claude Code, and Codex."""
+import sqlite3, sys, os, re, glob, json
+from abc import ABC, abstractmethod
+from datetime import date, timedelta
 
-DB_PATH = os.environ.get("OPENCODE_DB", os.path.expanduser("~/.local/share/opencode/opencode.db"))
-ANSI_ENABLED = sys.stdout.isatty() or "FORCE_COLOR" in os.environ
+# ── cross-platform paths ───────────────────────────────────────
+
+def _get_platform_data_dir(app_name):
+    """Resolve platform-specific application data directory."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~/AppData/Local"))
+        return os.path.join(base, app_name)
+    elif sys.platform == "darwin":
+        return os.path.expanduser(f"~/Library/Application Support/{app_name}")
+    else:
+        xdg = os.environ.get("XDG_DATA_HOME")
+        return os.path.join(xdg, app_name) if xdg else os.path.expanduser(f"~/.local/share/{app_name}")
+
+def _ensure_windows_ansi():
+    """Enable Virtual Terminal Processing on Windows for ANSI support."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        STD_OUTPUT_HANDLE = -11
+        ENABLE_VT = 0x0004
+        handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | ENABLE_VT)
+    except Exception:
+        pass
+
+_ensure_windows_ansi()
+
+ANSI_ENABLED = (sys.stdout.isatty() or "FORCE_COLOR" in os.environ) and "NO_COLOR" not in os.environ
 
 # ── twilight color palette (truecolor ANSI) ──────────────────────
 
@@ -185,47 +218,273 @@ def circle_gauge(value, max_val, count, label, color):
     pct_str = f"{pct*100:4.1f}%"
     return f"  {dots}  {label}  {pct_str}"
 
-# ── database ───────────────────────────────────────────────────
+# ── data providers ──────────────────────────────────────────────
 
-def query_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+class BaseProvider(ABC):
+    """Data provider for a CLI agent tool."""
+    @abstractmethod
+    def name(self) -> str: pass
 
-    cur.execute("""
-        SELECT date(time_created/1000, 'unixepoch') as day,
-               COUNT(*) as cnt,
-               SUM(CAST(json_extract(data, '$.tokens.total') AS INTEGER)) as total,
-               SUM(CAST(json_extract(data, '$.tokens.input') AS INTEGER)) as input_t,
-               SUM(CAST(json_extract(data, '$.tokens.output') AS INTEGER)) as output_t,
-               SUM(CAST(json_extract(data, '$.tokens.cache.read') AS INTEGER)) as cache_read,
-               SUM(CAST(json_extract(data, '$.cost') AS REAL)) as cost
-        FROM message 
-        WHERE json_extract(data, '$.tokens') IS NOT NULL
-        AND json_extract(data, '$.role') = 'assistant'
-        GROUP BY day ORDER BY day
-    """)
-    trends = [dict(r) for r in cur.fetchall()]
+    @abstractmethod
+    def source_path(self) -> str: pass
 
-    cur.execute("""
-        SELECT COALESCE(json_extract(data, '$.providerID'),'?') || '/' || 
-               COALESCE(json_extract(data, '$.modelID'),'?') as model,
-               COUNT(*) as cnt,
-               SUM(CAST(json_extract(data, '$.tokens.total') AS INTEGER)) as total,
-               SUM(CAST(json_extract(data, '$.cost') AS REAL)) as cost
-        FROM message 
-        WHERE json_extract(data, '$.tokens') IS NOT NULL
-        AND json_extract(data, '$.role') = 'assistant'
-        GROUP BY model ORDER BY total DESC
-    """)
-    models = [dict(r) for r in cur.fetchall()]
+    def is_available(self) -> bool:
+        return os.path.exists(self.source_path())
 
-    conn.close()
-    return trends, models
+    @abstractmethod
+    def get_trends(self) -> list[dict]: pass
+
+    @abstractmethod
+    def get_models(self) -> list[dict]: pass
+
+
+class OpenCodeProvider(BaseProvider):
+    """Reads opencode's SQLite message table."""
+    def name(self): return "opencode"
+
+    def source_path(self):
+        return os.environ.get("OPENCODE_DB",
+            os.path.join(_get_platform_data_dir("opencode"), "opencode.db"))
+
+    def _query(self):
+        conn = sqlite3.connect(self.source_path())
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT date(time_created/1000, 'unixepoch') as day,
+                   COUNT(*) as cnt,
+                   SUM(CAST(json_extract(data, '$.tokens.total') AS INTEGER)) as total,
+                   SUM(CAST(json_extract(data, '$.tokens.input') AS INTEGER)) as input_t,
+                   SUM(CAST(json_extract(data, '$.tokens.output') AS INTEGER)) as output_t,
+                   SUM(CAST(json_extract(data, '$.tokens.cache.read') AS INTEGER)) as cache_read,
+                   SUM(CAST(json_extract(data, '$.cost') AS REAL)) as cost
+            FROM message 
+            WHERE json_extract(data, '$.tokens') IS NOT NULL
+            AND json_extract(data, '$.role') = 'assistant'
+            GROUP BY day ORDER BY day
+        """)
+        trends = [dict(r) for r in cur.fetchall()]
+        cur.execute("""
+            SELECT COALESCE(json_extract(data, '$.providerID'),'?') || '/' || 
+                   COALESCE(json_extract(data, '$.modelID'),'?') as model,
+                   COUNT(*) as cnt,
+                   SUM(CAST(json_extract(data, '$.tokens.total') AS INTEGER)) as total,
+                   SUM(CAST(json_extract(data, '$.cost') AS REAL)) as cost
+            FROM message 
+            WHERE json_extract(data, '$.tokens') IS NOT NULL
+            AND json_extract(data, '$.role') = 'assistant'
+            GROUP BY model ORDER BY total DESC
+        """)
+        models = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return trends, models
+
+    def get_trends(self):
+        trends, _ = self._query()
+        return trends
+
+    def get_models(self):
+        _, models = self._query()
+        return models
+
+
+class ClaudeCodeProvider(BaseProvider):
+    """Reads Claude Code stats-cache.json (fast path) or JSONL transcripts."""
+    def name(self): return "claude"
+
+    def source_path(self):
+        return os.environ.get("CLAUDE_CONFIG_DIR",
+            os.path.expanduser("~/.claude"))
+
+    def is_available(self):
+        base = self.source_path()
+        return (os.path.exists(os.path.join(base, "stats-cache.json")) or
+                os.path.exists(os.path.join(base, "projects")))
+
+    def get_trends(self):
+        base = self.source_path()
+        cache_path = os.path.join(base, "stats-cache.json")
+        trends = []
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path) as f:
+                    cache = json.load(f)
+                daily = cache.get("dailyActivity") or cache.get("dailyModelTokens")
+                if daily:
+                    for day_str, tokens in daily.items():
+                        if isinstance(tokens, dict):
+                            total = sum(tokens.values())
+                        else:
+                            total = int(tokens)
+                        trends.append({
+                            "day": day_str, "cnt": 0, "total": total,
+                            "input_t": 0, "output_t": 0, "cache_read": 0, "cost": 0,
+                        })
+                    return trends
+            except Exception:
+                pass
+        # Fallback: scan JSONL
+        projects_dir = os.path.join(base, "projects")
+        if os.path.isdir(projects_dir):
+            day_map = {}
+            for jsonl_path in glob.glob(os.path.join(projects_dir, "**", "*.jsonl"), recursive=True):
+                try:
+                    with open(jsonl_path) as f:
+                        for line in f:
+                            if not line.strip():
+                                continue
+                            msg = json.loads(line)
+                            if msg.get("type") != "assistant":
+                                continue
+                            usage = msg.get("message", {}).get("usage", {})
+                            total = (usage.get("input_tokens", 0) +
+                                     usage.get("output_tokens", 0) +
+                                     usage.get("cache_read_input_tokens", 0) +
+                                     usage.get("cache_creation_input_tokens", 0))
+                            if total == 0:
+                                continue
+                            ts = msg.get("timestamp") or ""
+                            day = ts[:10]
+                            if day not in day_map:
+                                day_map[day] = {"input_t": 0, "output_t": 0, "cache_read": 0, "total": 0, "cnt": 0}
+                            day_map[day]["total"] += total
+                            day_map[day]["input_t"] += usage.get("input_tokens", 0)
+                            day_map[day]["output_t"] += usage.get("output_tokens", 0)
+                            day_map[day]["cache_read"] += (usage.get("cache_read_input_tokens", 0) +
+                                                           usage.get("cache_creation_input_tokens", 0))
+                            day_map[day]["cnt"] += 1
+                except Exception:
+                    continue
+            for day, data in sorted(day_map.items()):
+                data["day"] = day
+                data["cost"] = 0
+                trends.append(data)
+        return trends
+
+    def get_models(self):
+        base = self.source_path()
+        cache_path = os.path.join(base, "stats-cache.json")
+        models = []
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path) as f:
+                    cache = json.load(f)
+                model_usage = cache.get("modelUsage", {})
+                for model_name, data in model_usage.items():
+                    models.append({
+                        "model": model_name, "cnt": data.get("turns", 0),
+                        "total": data.get("tokens", 0), "cost": 0,
+                    })
+            except Exception:
+                pass
+        return models
+
+
+class CodexProvider(BaseProvider):
+    """Reads Codex SQLite state database (experimental)."""
+    def name(self): return "codex"
+
+    def source_path(self):
+        base = os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex"))
+        matches = glob.glob(os.path.join(base, "**", "state*.sqlite"), recursive=True)
+        if matches:
+            matches.sort(key=os.path.getmtime, reverse=True)
+            return matches[0]
+        return os.path.join(base, "data", "state.v5.sqlite")
+
+    def get_trends(self):
+        path = self.source_path()
+        if not os.path.exists(path):
+            return []
+        try:
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT date(created_at) as day, COUNT(*) as cnt,
+                       SUM(tokens_used) as total
+                FROM threads WHERE tokens_used IS NOT NULL
+                GROUP BY day ORDER BY day
+            """)
+            return [{
+                "day": r["day"], "cnt": r["cnt"], "total": r["total"] or 0,
+                "input_t": 0, "output_t": 0, "cache_read": 0, "cost": 0,
+            } for r in cur.fetchall()]
+        except Exception:
+            return []
+
+    def get_models(self):
+        path = self.source_path()
+        if not os.path.exists(path):
+            return []
+        try:
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT COALESCE(model_provider,'?') || '/' ||
+                       COALESCE(model,'?') as model,
+                       COUNT(*) as cnt,
+                       SUM(CAST(tokens_used AS INTEGER)) as total
+                FROM threads WHERE tokens_used IS NOT NULL
+                GROUP BY model ORDER BY total DESC
+            """)
+            return [{"model": r["model"], "cnt": r["cnt"], "total": r["total"] or 0, "cost": 0} for r in cur.fetchall()]
+        except Exception:
+            return []
+
+
+PROVIDERS = [OpenCodeProvider(), ClaudeCodeProvider(), CodexProvider()]
+
+
+def discover_providers():
+    """Return all available providers with existing data sources."""
+    available = []
+    for p in PROVIDERS:
+        try:
+            if p.is_available():
+                available.append(p)
+        except Exception:
+            pass
+    return available
+
+
+def select_provider():
+    """Interactive selection or environment-variable-driven choice."""
+    env_choice = os.environ.get("DASHBOARD_PROVIDER", "").strip().lower()
+    available = discover_providers()
+    if not available:
+        print("No agent data sources found.", file=sys.stderr)
+        sys.exit(1)
+    # Env var preselection
+    if env_choice:
+        for p in available:
+            if p.name() == env_choice:
+                return p
+    if len(available) == 1:
+        return available[0]
+    # Non-TTY: pick first
+    if not sys.stdin.isatty():
+        return available[0]
+    # Interactive menu
+    print("\n  Available agents:", file=sys.stderr)
+    for i, p in enumerate(available, 1):
+        print(f"    [{i}] {p.name()}  ({p.source_path()})", file=sys.stderr)
+    print(file=sys.stderr)
+    while True:
+        try:
+            choice = input(f"  Select [1-{len(available)}, default=1]: ").strip()
+            if not choice:
+                return available[0]
+            idx = int(choice) - 1
+            if 0 <= idx < len(available):
+                return available[idx]
+        except (ValueError, EOFError):
+            return available[0]
 
 # ── render ─────────────────────────────────────────────────────
 
-def render(trends, models):
+def render(trends, models, source_label=""):
     lines = []
     total_tokens = sum(t['total'] or 0 for t in trends)
     total_cost = sum(t['cost'] or 0 for t in trends)
@@ -241,7 +500,7 @@ def render(trends, models):
     lines.append(hline('╭', '─', '╮', 'BDR'))
 
     # Title
-    title = center_text('OP  encode  ·  token  dashboard')
+    title = center_text(f"{source_label.split(' @ ')[0] if source_label else 'agent'}  ·  token  dashboard")
     lines.append(f"  {c('BDR')}│{c('RST')} {c('A0')}{c('BOLD')}{title}{c('RST')} {c('BDR')}│{c('RST')}")
 
     # Summary
@@ -267,7 +526,6 @@ def render(trends, models):
     lines.append(f"  {c('BDR')}│{c('RST')} {build_line([('─' * CONTENT_W, 'DIM')])} {c('BDR')}│{c('RST')}")
 
     if trends:
-        from datetime import date, timedelta
         day_map = {}
         max_t = max(t['total'] or 0 for t in trends)
         for t in trends:
@@ -308,10 +566,14 @@ def render(trends, models):
 
         all_dates = sorted(day_map.keys())
         if all_dates:
-            start = date.fromisoformat(all_dates[0])
-            end = date.fromisoformat(all_dates[-1])
-            start -= timedelta(days=start.weekday())
-            end += timedelta(days=6 - end.weekday())
+            # Heatmap window: last 14 days (configurable via DASHBOARD_HEATMAP_DAYS)
+            today_val = date.today()
+            heatmap_days = int(os.environ.get("DASHBOARD_HEATMAP_DAYS", "14"))
+            cutoff = today_val - timedelta(days=heatmap_days)
+            # Align to Monday for clean week rows
+            cutoff -= timedelta(days=cutoff.weekday())
+            start = cutoff
+            end = today_val + timedelta(days=6 - today_val.weekday())
 
             weeks = []
             cur = start
@@ -342,7 +604,7 @@ def render(trends, models):
                 week_sum = 0
                 for di in range(7):
                     d = w + timedelta(days=di)
-                    if d < date.fromisoformat(all_dates[0]) or d > date.fromisoformat(all_dates[-1]):
+                    if d < cutoff or d > today_val:
                         row_parts.append(('      ', None))
                     elif d.isoformat() not in day_map or day_map[d.isoformat()]['total'] == 0:
                         row_parts.append((f' {c("DIM")}·{c("RST")}    ', None))
@@ -543,7 +805,7 @@ def render(trends, models):
     lines.append(hline('╰', '─', '╯', 'BDR'))
     lines.append("")
 
-    footer = f"opencode db @ {DB_PATH}"
+    footer = source_label if source_label else "opencode db"
     lines.append(f"  {c('DIM')}{footer}{' ' * (76 - vlen(footer))}{c('RST')}")
     lines.append("")
 
@@ -552,8 +814,11 @@ def render(trends, models):
 # ── main ───────────────────────────────────────────────────────
 
 def main():
-    trends, models = query_db()
-    print(render(trends, models))
+    provider = select_provider()
+    trends = provider.get_trends()
+    models = provider.get_models()
+    label = f"{provider.name()} @ {provider.source_path()}"
+    print(render(trends, models, label))
 
 if __name__ == "__main__":
     main()

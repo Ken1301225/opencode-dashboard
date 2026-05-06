@@ -2,8 +2,8 @@ from setuptools import setup
 
 setup(
     name="opencode-dashboard",
-    version="1.0.0",
-    description="Terminal token consumption dashboard for opencode with mahjong tile heatmaps",
+    version="2.0.0",
+    description="Terminal token consumption dashboard for AI CLI agents. Mahjong tile heatmaps, cross-platform (Win/Mac/Linux), supports OpenCode, Claude Code, Codex.",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     author="Ken",

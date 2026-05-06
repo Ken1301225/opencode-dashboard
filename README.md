@@ -1,28 +1,57 @@
-# opencode-dashboard
+# agent-dashboard
 
-🀙🀚🀛🀜🀝🀞 一个用麻将筒子做热力图、支持 twilight 渐变配色的终端 Token 消费可视化面板。
+🀙🀚🀛🀜🀝🀞 Terminal token consumption visualizer for AI CLI agents — OpenCode, Claude Code, Codex, and more.
 
-![preview](https://img.shields.io/badge/python-3.8%2B-blue)
+![python](https://img.shields.io/badge/python-3.8%2B-blue)
+![platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 ## 特性
 
+- **多 Agent 支持**：兼容 OpenCode、Claude Code、Codex，运行时交互式选择数据源
 - **麻将热力图**：用 Unicode 麻将筒子（🀙→🀞）做 1-6 级密度可视化，天然圆点递进
 - **Twilight 渐变**：48 格连续 truecolor 光谱，indigo→rose 平滑过渡
-- **光谱图例**：只标注实际出现的密度等级 + 两端边界，支持上下错位防重叠
+- **跨平台**：Windows / macOS / Linux 全平台路径解析 + ANSI 适配
+- **智能窗口**：日历热力图只展示最近 2 周（可配置），避免信息过载
 - **周趋势 sparkline**：每周末尾显示 ▁▂▃▄▅▆▇█ 微柱状图 + 周总量
 - **每日明细**：最近 5 个活跃日的 input/output/cache/total 分项统计
 - **模型分布**：8 倍分辨率 eighth-block 柱状图（▏▎▍▌▋▊▉█）
 - **零依赖**：仅使用 Python 标准库 + sqlite3
 
-## 安装
-
-### 方式一：直接下载使用
+## 使用
 
 ```bash
-# 克隆仓库
-git clone https://github.com/Ken1301225/opencode-dashboard.git
-cd opencode-dashboard
+# 直接运行（自动检测数据源）
+python3 opencode_dashboard.py
+
+# 多 Agent 并存时会弹出交互式选择菜单：
+#   Available agents:
+#     [1] opencode  (/home/ken/.local/share/opencode/opencode.db)
+#     [2] claude    (/home/ken/.claude)
+#   Select [1-2, default=1]:
+```
+
+### 环境变量
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `DASHBOARD_PROVIDER` | 预设数据源（opencode/claude/codex） | 交互式选择 |
+| `OPENCODE_DB` | OpenCode 数据库路径 | 平台默认路径 |
+| `CLAUDE_CONFIG_DIR` | Claude Code 配置目录 | `~/.claude` |
+| `CODEX_HOME` | Codex 数据目录 | `~/.codex` |
+| `DASHBOARD_HEATMAP_DAYS` | 热力图时间窗口（天） | 14 |
+| `FORCE_COLOR` | 强制启用 ANSI 颜色 | off |
+| `NO_COLOR` | 禁用所有颜色 | off |
+
+### 非交互模式
+
+```bash
+# 直接指定数据源，跳过交互菜单
+DASHBOARD_PROVIDER=claude python3 opencode_dashboard.py
+
+# 查看更长时间段的热力图
+DASHBOARD_HEATMAP_DAYS=30 python3 opencode_dashboard.py
+```
 
 # 赋予执行权限
 chmod +x opencode-dashboard.py
@@ -80,28 +109,13 @@ source ~/.zshrc
 opencode-dashboard
 ```
 
-## 自定义数据库路径
 
-默认读取 `~/.local/share/opencode/opencode.db`，可通过环境变量自定义：
-
-```bash
-export OPENCODE_DB=/custom/path/to/opencode.db
-opencode-dashboard
-```
-
-## 强制启用颜色
-
-如果输出被管道传递或重定向，颜色会自动禁用。可通过环境变量强制启用：
-
-```bash
-FORCE_COLOR=1 opencode-dashboard
-```
 
 ## 效果预览
 
 ```
   ╭──────────────────────────────────────────────────────────────────────────╮
-  │                    OP  encode  ·  token  dashboard                     │
+  │                     opencode  ·  token  dashboard                      │
   │                 160M  ·  $22.42  ·  15d  ·  1988 calls                 │
   │ ──────────────────────────────────────────────────────────────────────── │
   │   ●○○○○○○○○○○○○○○○○○○  input    7.2%                                    │
@@ -170,7 +184,11 @@ FORCE_COLOR=1 opencode-dashboard
 | 颜色系统 | ANSI truecolor 线性插值（6 个 twilight stop） |
 | 柱状图 | 左向 eighth-block（▏▎▍▌▋▊▉█） |
 | IO 仪表盘 | 空心/实心圆组合（●○） |
-| 数据库 | sqlite3 原生查询 |
+| OpenCode 后端 | SQLite `message` 表，JSON 提取 tokens/cost |
+| Claude Code 后端 | `stats-cache.json` 聚合缓存 + JSONL 回退 |
+| Codex 后端 | SQLite `threads` 表（实验性） |
+| 跨平台路径 | Windows `%LOCALAPPDATA%`, macOS `~/Library`, Linux `XDG` |
+| ANSI 适配 | Windows `SetConsoleMode` VT + `NO_COLOR` 标准 |
 
 ## License
 
